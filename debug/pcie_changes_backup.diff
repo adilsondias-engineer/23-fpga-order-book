@@ -1,0 +1,78 @@
+# PCIe Debug Changes Backup - 2025-12-25
+# These changes were made during PCIe C2H debugging and may be useful later
+#
+# Key changes:
+# 1. build.tcl - Gen2 config (5.0_GT/s @ 250MHz) instead of Gen1 - KEEP THIS
+# 2. build.tcl - TEST_MODE variable for PCIe debugging
+# 3. order_book_top.vhd - TEST_MODE generic and test generators
+# 4. order_book_top.vhd - Entity instantiation style (removed component declarations) - GOOD CLEANUP
+# 5. pcie_bbo_top.vhd - Additional debug signals (cdc_wr_count, cdc_rd_count, etc.)
+# 6. debug_formatter.vhd - PCIe debug output (trdy, tval, empt, srdy, etc.)
+# 7. bbo_receiver.c - Code formatting cleanup
+#
+# To restore these changes:
+#   git apply 23-order-book/debug/pcie_changes_backup.diff
+#
+# Note: TEST_MODE=1 (bypass mode) caused PC freeze - avoid using it!
+# Note: After reverting, must manually restore Gen2 speed in build.tcl
+
+diff --git a/23-order-book/host/bbo_receiver.c b/23-order-book/host/bbo_receiver.c
+index b097ffa..c0cef31 100644
+--- a/23-order-book/host/bbo_receiver.c
++++ b/23-order-book/host/bbo_receiver.c
+@@ -39,34 +39,37 @@
+ // XDMA device interface GUID (from xdma_public.h)
+ // {74c7e4a9-6d5d-4a70-bc0d-20691dff9e9d}
+ DEFINE_GUID(GUID_DEVINTERFACE_XDMA,
+-    0x74c7e4a9, 0x6d5d, 0x4a70, 0xbc, 0x0d, 0x20, 0x69, 0x1d, 0xff, 0x9e, 0x9d);
++            0x74c7e4a9, 0x6d5d, 0x4a70, 0xbc, 0x0d, 0x20, 0x69, 0x1d, 0xff, 0x9e, 0x9d);
+
+ #pragma pack(push, 1)
+-typedef struct {
+-    char     symbol[8];      // 0-7
+-    uint32_t bid_price;      // 8-11
+-    uint32_t bid_size;       // 12-15
+-    uint32_t ask_price;      // 16-19
+-    uint32_t ask_size;       // 20-23
+-    uint32_t spread;         // 24-27
+-    uint32_t ts_t1;          // 28-31: ITCH parse timestamp
+-    uint32_t ts_t2;          // 32-35: CDC FIFO write
+-    uint32_t ts_t3;          // 36-39: BBO FIFO read
+-    uint32_t ts_t4;          // 40-43: TX start
+-    uint32_t padding;        // 44-47: Should be 0xDEADBEEF
++typedef struct
++{
++    char symbol[8];     // 0-7
++    uint32_t bid_price; // 8-11
++    uint32_t bid_size;  // 12-15
++    uint32_t ask_price; // 16-19
++    uint32_t ask_size;  // 20-23
++    uint32_t spread;    // 24-27
++    uint32_t ts_t1;     // 28-31: ITCH parse timestamp
++    uint32_t ts_t2;     // 32-35: CDC FIFO write
++    uint32_t ts_t3;     // 36-39: BBO FIFO read
++    uint32_t ts_t4;     // 40-43: TX start
++    uint32_t padding;   // 44-47: Should be 0xDEADBEEF
+ } BboPacket;
+ #pragma pack(pop)
+
+--- Summary of key changes to restore ---
+
+build.tcl Gen2 configuration (apply after revert):
+- CONFIG.pl_link_cap_max_link_speed {5.0_GT/s}
+- CONFIG.axisten_freq {250}
+
+order_book_top.vhd entity style (good cleanup - removes redundant component declarations):
+- Uses "entity work.xxx" syntax instead of component declarations
+- Reduces code size by ~300 lines
+- No functional change, just cleaner code
+
+pcie_bbo_top.vhd debug signals:
+- dbg_cdc_wr_count : out STD_LOGIC_VECTOR(31 downto 0)
+- dbg_cdc_rd_count : out STD_LOGIC_VECTOR(31 downto 0)
+- dbg_axis_tx_count : out STD_LOGIC_VECTOR(31 downto 0)
+- dbg_tready_seen : out STD_LOGIC
+
+debug_formatter.vhd PCIe debug output:
+- Shows: trdy, tval, empt, srdy, axis_tx, lnk
+- These help diagnose XDMA tready issues
