@@ -12,7 +12,6 @@
 *.cf
 # Compiled IP (keep .xci configuration, exclude compiled output)
 *.dcp
-
 # Simulation files
 *.wdb
 *.vcd

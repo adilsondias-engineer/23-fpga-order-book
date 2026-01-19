@@ -406,8 +406,16 @@ begin
             if itch_msg_valid_int = '1' then
                 msg_count <= msg_count + 1;
             end if;
-            if add_order_start_int = '1' then
-                ts_t1_125 <= std_logic_vector(rgmii_cycle_counter);
+            -- Capture T1 at START of ANY order-affecting message
+            -- Detect message type directly from UDP payload first byte when payload starts
+            -- Message types: A(0x41)=Add, D(0x44)=Delete, E(0x45)=Executed, U(0x55)=Replace, X(0x58)=Cancel
+            if udp_payload_start = '1' and udp_payload_valid = '1' then
+                case udp_payload_data is
+                    when x"41" | x"44" | x"45" | x"55" | x"58" =>
+                        ts_t1_125 <= std_logic_vector(rgmii_cycle_counter);
+                    when others =>
+                        null;  -- Non-order messages: don't update T1
+                end case;
             end if;
         end if;
     end process;

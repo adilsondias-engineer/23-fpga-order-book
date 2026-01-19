@@ -7,7 +7,7 @@
 
 set project_dir "./vivado_project"
 set project_name "23-order-book"
-set_param general.maxThreads 16
+set_param general.maxThreads 4
 puts "=============================================="
 puts "Incremental Build - Opening existing project"
 puts "=============================================="
@@ -28,7 +28,7 @@ reset_run synth_1
 
 # Run synthesis
 puts "Starting synthesis..."
-launch_runs synth_1 -jobs 16
+launch_runs synth_1 -jobs 4
 wait_on_run synth_1
 
 # Check synthesis status
@@ -44,7 +44,7 @@ puts "Resetting implementation run..."
 reset_run impl_1
 
 puts "Starting implementation..."
-launch_runs impl_1 -jobs 16
+launch_runs impl_1 -jobs 4
 wait_on_run impl_1
 
 # Check implementation status
@@ -57,7 +57,7 @@ puts "Implementation completed successfully."
 
 # Generate bitstream
 puts "Generating bitstream..."
-launch_runs impl_1 -to_step write_bitstream -jobs 8
+launch_runs impl_1 -to_step write_bitstream -jobs 4
 wait_on_run impl_1
 
 # Find and program bitstream

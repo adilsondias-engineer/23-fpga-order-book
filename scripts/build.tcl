@@ -15,7 +15,7 @@ set project_name "23-order-book"
 set project_dir "./vivado_project"
 set part_name "xc7a200tfbg484-2"
 set board_part ""
-set_param general.maxThreads 16
+set_param general.maxThreads 4
 
 # Create project
 create_project $project_name $project_dir -part $part_name -force
@@ -34,7 +34,6 @@ puts "Adding custom RTL source files..."
 add_files -norecurse {
     src/order_book_top.vhd
 }
-
 # PCIe bridge components
 add_files -norecurse [glob -nocomplain src/pcie/*.vhd]
 
@@ -43,7 +42,6 @@ add_files -norecurse [glob -nocomplain src/ethernet/*.vhd]
 
 # ITCH parser components
 add_files -norecurse [glob -nocomplain src/itch/*.vhd]
-
 # Order book components
 add_files -norecurse [glob -nocomplain src/order_book/*.vhd]
 
@@ -518,7 +516,7 @@ set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.ARGS.DIRECTIVE AggressiveExplore [
 
 # Run synthesis
 # puts "Starting synthesis..."
-launch_runs synth_1 -jobs 16
+launch_runs synth_1 -jobs 4
 wait_on_run synth_1
 
 # Check synthesis status
@@ -530,7 +528,7 @@ puts "Synthesis completed successfully."
 
 # Run implementation through bitstream
 puts "Starting implementation..."
-launch_runs impl_1 -jobs 16
+launch_runs impl_1 -jobs 4
 wait_on_run impl_1
 
 # Check implementation status
@@ -542,7 +540,7 @@ puts "Implementation completed successfully."
 
 # Generate bitstream
 puts "Generating bitstream..."
-launch_runs impl_1 -to_step write_bitstream -jobs 8
+launch_runs impl_1 -to_step write_bitstream -jobs 4
 wait_on_run impl_1
 
 

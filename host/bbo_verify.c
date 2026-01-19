@@ -2,13 +2,17 @@
  * BBO Packet Verification Tool (Linux)
  * Reads from XDMA C2H channel and verifies BBO packet format
  *
- * BBO Packet Format (48 bytes = 6 x 64-bit beats):
- *   Beat 1 (bytes 0-7):   Symbol (8 ASCII chars, e.g., "TESTAAPL")
- *   Beat 2 (bytes 8-15):  BidPrice[31:0] | BidSize[63:32]
- *   Beat 3 (bytes 16-23): AskPrice[31:0] | AskSize[63:32]
- *   Beat 4 (bytes 24-31): Spread[31:0]   | T1[63:32]
- *   Beat 5 (bytes 32-39): T2[31:0]       | T3[63:32]
- *   Beat 6 (bytes 40-47): T4[31:0]       | Padding[63:32] (0xDEADBEEF)
+ * BBO Packet Format (56 bytes = 7 x 64-bit beats):
+ *   Beat 1 (bytes 0-7):   Magic (0xBB0BB048) | Length (0x00000038)
+ *   Beat 2 (bytes 8-15):  Symbol (8 ASCII chars, e.g., "TESTAAPL")
+ *   Beat 3 (bytes 16-23): BidPrice[31:0] | BidSize[63:32]
+ *   Beat 4 (bytes 24-31): AskPrice[31:0] | AskSize[63:32]
+ *   Beat 5 (bytes 32-39): Spread[31:0]   | T1[63:32]
+ *   Beat 6 (bytes 40-47): T2[31:0]       | T3[63:32]
+ *   Beat 7 (bytes 48-55): T4[31:0]       | Reserved[63:32] (0x00000000)
+ *
+ * Magic Header: 0xBB0BB048 (mnemonic: "BBO" + "48" for original 48-byte payload)
+ * Packet Length: 0x00000038 (56 bytes total including header)
  *
  * Build: gcc -O2 -o bbo_verify bbo_verify.c
  *
@@ -30,7 +34,12 @@
 
 #define DEFAULT_DEVICE "/dev/xdma0_c2h_0"
 #define DEFAULT_COUNT 10
-#define BBO_PACKET_SIZE 48  /* 6 beats x 8 bytes */
+#define BBO_PACKET_SIZE 56  /* 7 beats x 8 bytes */
+
+/* Magic header for packet synchronization (must match FPGA byte order) */
+/* FPGA sends bytes: BB 0B B0 48 -> little-endian uint32 = 0x48B00BBB */
+#define BBO_MAGIC_HEADER  0x48B00BBB
+#define BBO_PACKET_LENGTH 0x38000000  /* 56 bytes, byte-swapped */
 
 /* Known symbols for packet boundary detection */
 static const char *KNOWN_SYMBOLS[] = {
@@ -40,19 +49,21 @@ static const char *KNOWN_SYMBOLS[] = {
 };
 #define NUM_KNOWN_SYMBOLS 10
 
-/* BBO Packet structure (packed, 48 bytes) */
+/* BBO Packet structure (packed, 56 bytes) */
 typedef struct __attribute__((packed)) {
-    char     symbol[8];      /* Bytes 0-7: ASCII symbol */
-    uint32_t bid_price;      /* Bytes 8-11: Bid price (fixed-point, /10000 for dollars) */
-    uint32_t bid_size;       /* Bytes 12-15: Bid size (shares) */
-    uint32_t ask_price;      /* Bytes 16-19: Ask price */
-    uint32_t ask_size;       /* Bytes 20-23: Ask size */
-    uint32_t spread;         /* Bytes 24-27: Spread (ask - bid) */
-    uint32_t ts_t1;          /* Bytes 28-31: T1 timestamp (ITCH parse) */
-    uint32_t ts_t2;          /* Bytes 32-35: T2 timestamp (CDC FIFO write) */
-    uint32_t ts_t3;          /* Bytes 36-39: T3 timestamp (BBO FIFO read) */
-    uint32_t ts_t4;          /* Bytes 40-43: T4 timestamp (TX start) */
-    uint32_t discard_count;  /* Bytes 44-47: Packets discarded before this one */
+    uint32_t magic;          /* Bytes 0-3: Magic header (0xBB0BB048) */
+    uint32_t length;         /* Bytes 4-7: Packet length (0x00000038 = 56) */
+    char     symbol[8];      /* Bytes 8-15: ASCII symbol */
+    uint32_t bid_price;      /* Bytes 16-19: Bid price (fixed-point, /10000 for dollars) */
+    uint32_t bid_size;       /* Bytes 20-23: Bid size (shares) */
+    uint32_t ask_price;      /* Bytes 24-27: Ask price */
+    uint32_t ask_size;       /* Bytes 28-31: Ask size */
+    uint32_t spread;         /* Bytes 32-35: Spread (ask - bid) */
+    uint32_t ts_t1;          /* Bytes 36-39: T1 timestamp (ITCH parse) */
+    uint32_t ts_t2;          /* Bytes 40-43: T2 timestamp (CDC FIFO write) */
+    uint32_t ts_t3;          /* Bytes 44-47: T3 timestamp (BBO FIFO read) */
+    uint32_t ts_t4;          /* Bytes 48-51: T4 timestamp (TX start) */
+    uint32_t reserved;       /* Bytes 52-55: Reserved/padding */
 } BboPacket;
 
 /*
@@ -68,21 +79,21 @@ int is_known_symbol(const char *symbol) {
 }
 
 /*
- * Find the first valid packet boundary by searching for known symbol at start.
+ * Find the first valid packet boundary by searching for magic header.
  * XDMA may have residual data from previous runs, causing initial misalignment.
  * Returns offset to first valid packet, or -1 if not found.
  */
 int find_packet_boundary(const uint8_t *buf, size_t len) {
-    /* Search for a known symbol at the start of a potential packet */
+    /* Search for magic header at the start of a potential packet */
     for (size_t i = 0; i <= len - BBO_PACKET_SIZE; i++) {
         const BboPacket *pkt = (const BboPacket *)(buf + i);
-        if (is_known_symbol(pkt->symbol)) {
-            /* Found known symbol - this looks like a valid packet */
-            /* Additional check: verify next packet also has valid symbol if there's room */
+        if (pkt->magic == BBO_MAGIC_HEADER && pkt->length == BBO_PACKET_LENGTH) {
+            /* Found magic header - this looks like a valid packet */
+            /* Additional check: verify next packet also has valid header if there's room */
             if (i + 2 * BBO_PACKET_SIZE <= len) {
                 const BboPacket *next_pkt = (const BboPacket *)(buf + i + BBO_PACKET_SIZE);
-                if (is_known_symbol(next_pkt->symbol)) {
-                    return i;  /* Two consecutive valid symbols - high confidence */
+                if (next_pkt->magic == BBO_MAGIC_HEADER && next_pkt->length == BBO_PACKET_LENGTH) {
+                    return i;  /* Two consecutive valid headers - high confidence */
                 }
             } else {
                 return i;  /* Only one packet fits, assume it's valid */
@@ -98,12 +109,22 @@ void print_bbo(const BboPacket *pkt, int index, int gen2_mode) {
     symbol[8] = '\0';
 
     /* Calculate latency in nanoseconds
-     * Gen1 (125 MHz): 8 ns per cycle
-     * Gen2 (250 MHz): 4 ns per cycle
+     * T1/T2: RGMII RX domain - ALWAYS 125 MHz (8 ns per cycle)
+     * T3/T4: AXI/XDMA domain - Gen2 (250 MHz, 4 ns) or Gen1 (125 MHz, 8 ns)
      */
-    uint32_t latency_cycles = pkt->ts_t4 - pkt->ts_t1;
-    uint32_t ns_per_cycle = gen2_mode ? 4 : 8;
-    uint32_t latency_ns = latency_cycles * ns_per_cycle;
+    uint32_t ns_per_cycle_rgmii = 8;  /* T1/T2: always 125 MHz */
+    uint32_t ns_per_cycle_axi = gen2_mode ? 4 : 8;  /* T3/T4: Gen2=250MHz */
+
+    /* Latency A: ITCH parse to CDC FIFO write (T1 to T2) */
+    uint32_t delta_a = (pkt->ts_t2 >= pkt->ts_t1) ? (pkt->ts_t2 - pkt->ts_t1) : 0;
+    uint32_t latency_a_ns = delta_a * ns_per_cycle_rgmii;
+
+    /* Latency B: BBO FIFO read to AXI TX start (T3 to T4) */
+    uint32_t delta_b = (pkt->ts_t4 >= pkt->ts_t3) ? (pkt->ts_t4 - pkt->ts_t3) : 0;
+    uint32_t latency_b_ns = delta_b * ns_per_cycle_axi;
+
+    /* Total latency */
+    uint32_t total_latency_ns = latency_a_ns + latency_b_ns;
 
     /* Calculate correct spread locally (FPGA spread may be stale) */
     uint32_t calculated_spread;
@@ -116,6 +137,8 @@ void print_bbo(const BboPacket *pkt, int index, int gen2_mode) {
     }
 
     printf("BBO #%d:\n", index);
+    printf("  Magic:     0x%08X (len=%u)%s\n", pkt->magic, pkt->length,
+           (pkt->magic == BBO_MAGIC_HEADER && pkt->length == BBO_PACKET_LENGTH) ? " [OK]" : " [INVALID]");
     printf("  Symbol:    '%s'\n", symbol);
     printf("  Bid:       $%.4f x %u shares\n",
            pkt->bid_price / 10000.0, pkt->bid_size);
@@ -128,10 +151,10 @@ void print_bbo(const BboPacket *pkt, int index, int gen2_mode) {
     }
     printf("  Timestamps: T1=%u T2=%u T3=%u T4=%u\n",
            pkt->ts_t1, pkt->ts_t2, pkt->ts_t3, pkt->ts_t4);
-    printf("  Latency:   %u cycles (%u ns) [%s]\n", latency_cycles, latency_ns,
-           gen2_mode ? "Gen2 250MHz" : "Gen1 125MHz");
-    printf("  Discards:  %u %s\n", pkt->discard_count,
-           pkt->discard_count == 0 ? "[clean]" : "[packets skipped!]");
+    printf("  Latency A: %u cycles (%u ns) [RGMII 125MHz]\n", delta_a, latency_a_ns);
+    printf("  Latency B: %u cycles (%u ns) [AXI %s]\n", delta_b, latency_b_ns,
+           gen2_mode ? "250MHz" : "125MHz");
+    printf("  Total:     %u ns (%.3f us)\n", total_latency_ns, total_latency_ns / 1000.0);
     printf("\n");
 }
 
@@ -170,13 +193,26 @@ void print_raw_dump(const uint8_t *buf, size_t len) {
 int verify_bbo(const BboPacket *pkt, int *errors) {
     int local_errors = 0;
 
-    /* Check for valid symbol */
+    /* Check magic header */
+    if (pkt->magic != BBO_MAGIC_HEADER) {
+        printf("  ERROR: Invalid magic header: 0x%08X (expected 0x%08X)\n",
+               pkt->magic, BBO_MAGIC_HEADER);
+        local_errors++;
+    }
+
+    /* Check packet length */
+    if (pkt->length != BBO_PACKET_LENGTH) {
+        printf("  ERROR: Invalid packet length: %u (expected %u)\n",
+               pkt->length, BBO_PACKET_LENGTH);
+        local_errors++;
+    }
+
+    /* Check for valid symbol (warning only - magic header is authoritative) */
     if (!is_known_symbol(pkt->symbol)) {
         char sym[9];
         memcpy(sym, pkt->symbol, 8);
         sym[8] = '\0';
-        printf("  ERROR: Unknown symbol '%s'\n", sym);
-        local_errors++;
+        printf("  WARNING: Unknown symbol '%s'\n", sym);
     }
 
     /* Check for reasonable price values (non-zero, less than $1M) */
@@ -306,10 +342,11 @@ int main(int argc, char **argv) {
         reset_fpga_state();
     }
 
-    printf("BBO Packet Verification (Project 23 - 48-byte format)\n");
-    printf("====================================================\n");
+    printf("BBO Packet Verification (Project 23 - 56-byte format with magic header)\n");
+    printf("======================================================================\n");
     printf("Device: %s\n", device);
-    printf("Packet size: %d bytes (6 beats x 8 bytes)\n", BBO_PACKET_SIZE);
+    printf("Packet size: %d bytes (7 beats x 8 bytes)\n", BBO_PACKET_SIZE);
+    printf("Magic header: 0x%08X\n", BBO_MAGIC_HEADER);
     printf("Packets to read: %d (%d bytes)\n", count, count * BBO_PACKET_SIZE);
     printf("PCIe mode: %s (%d ns/cycle)\n", gen2_mode ? "Gen2 250MHz" : "Gen1 125MHz",
            gen2_mode ? 4 : 8);
@@ -329,7 +366,7 @@ int main(int argc, char **argv) {
 
     /* Allocate buffer (aligned for DMA) */
     size_t buf_size = count * BBO_PACKET_SIZE + 256;  /* Extra for partial packet detection */
-    uint8_t *buf = aligned_alloc(4096, buf_size);
+    uint8_t *buf = (uint8_t *)aligned_alloc(4096, buf_size);
     if (!buf) {
         perror("Failed to allocate buffer");
         close(fd);
@@ -339,6 +376,9 @@ int main(int argc, char **argv) {
 
     /* Read data - non-blocking with retry loop */
     printf("Reading BBO packets from FPGA (non-blocking)...\n");
+    printf("Note: If you see DMAR errors in dmesg, IOMMU may be blocking DMA.\n");
+    printf("      Check: dmesg | grep -i dmar\n");
+    printf("      If IOMMU is enabled, you may need to disable it or configure it properly.\n\n");
 
     struct timeval start, end;
     gettimeofday(&start, NULL);
@@ -370,8 +410,25 @@ int main(int argc, char **argv) {
                 retry_count++;
             }
         } else {
-            /* Real error */
-            perror("Read failed");
+            /* Real error - print detailed error information */
+            int errno_save = errno;
+            printf("\nRead failed: errno=%d (%s)\n", errno_save, strerror(errno_save));
+            if (errno_save == EIO) {
+                printf("  EIO: I/O error - check XDMA driver and PCIe link status\n");
+                printf("       This may indicate DMA transfer failure or FPGA not sending data\n");
+            } else if (errno_save == ENODEV) {
+                printf("  ENODEV: Device not found - check XDMA driver is loaded\n");
+            } else if (errno_save == EINVAL) {
+                printf("  EINVAL: Invalid argument - check buffer alignment\n");
+            } else {
+                printf("  Unknown error code - check XDMA driver logs: dmesg | tail -20\n");
+            }
+            printf("\n  If you see DMAR errors in dmesg:\n");
+            printf("    1. Check IOMMU status: dmesg | grep -i \"DMAR\\|IOMMU\"\n");
+            printf("    2. If IOMMU is blocking DMA, you may need to:\n");
+            printf("       - Disable IOMMU in BIOS/UEFI, OR\n");
+            printf("       - Add kernel parameter: intel_iommu=off (for Intel) or iommu=off\n");
+            printf("    3. Check if FPGA is actually sending data (state machine may be stuck)\n");
             break;
         }
     }
@@ -383,7 +440,17 @@ int main(int argc, char **argv) {
 
     if (bytes_read <= 0) {
         printf("No data received after %d retries.\n", max_retries);
-        printf("Make sure to send ITCH data to the FPGA before running this tool.\n");
+        printf("\nDiagnostics:\n");
+        printf("  1. Check XDMA driver: lsmod | grep xdma\n");
+        printf("  2. Check device exists: ls -la %s\n", device);
+        printf("  3. Check device permissions: ls -l %s\n", device);
+        printf("  4. Check XDMA status: dmesg | grep -i xdma | tail -10\n");
+        printf("  5. Check DMAR/IOMMU errors: dmesg | grep -i dmar\n");
+        printf("     If IOMMU is blocking DMA, add kernel parameter: intel_iommu=off\n");
+        printf("  6. Make sure to send ITCH data to the FPGA before running this tool.\n");
+        printf("  7. If XDMA transfer times out, FPGA state machine may be stuck.\n");
+        printf("     Check FPGA debug outputs (dbg_state, dbg_tvalid_now, dbg_tready_now).\n");
+        printf("  8. Try with -raw flag to see any data that might be present.\n");
         free(buf);
         close(fd);
         return 1;
@@ -426,13 +493,18 @@ int main(int argc, char **argv) {
     int packets_read = data_len / BBO_PACKET_SIZE;
     int errors = 0;
     int valid_packets = 0;
-    uint64_t total_discards = 0;
 
     printf("Parsing %d BBO packets:\n", packets_read);
     printf("========================\n\n");
 
     for (int i = 0; i < packets_read; i++) {
         BboPacket *pkt = (BboPacket *)(data_start + i * BBO_PACKET_SIZE);
+
+        // Skip packets without valid magic header (garbage/residual data)
+        if (pkt->magic != BBO_MAGIC_HEADER) {
+            printf("BBO #%d: Skipping (invalid magic: 0x%08X)\n\n", i + 1, pkt->magic);
+            continue;
+        }
 
         // Skip initial BBO with uninitialized ask price (0xFFFFFFFF from reset)
         // After software reset, best_ask_price_reg initializes to all 1's until real ask data arrives
@@ -444,15 +516,13 @@ int main(int argc, char **argv) {
         print_bbo(pkt, i + 1, gen2_mode);
 
         if (verbose) {
-            print_raw_beats((uint64_t *)(data_start + i * BBO_PACKET_SIZE), 6);
+            print_raw_beats((uint64_t *)(data_start + i * BBO_PACKET_SIZE), 7);
             printf("\n");
         }
 
         if (verify_bbo(pkt, &errors)) {
             valid_packets++;
         }
-
-        total_discards += pkt->discard_count;
     }
 
     /* Summary */
@@ -462,7 +532,6 @@ int main(int argc, char **argv) {
     printf("Bytes read:     %zd\n", bytes_read);
     printf("Packets parsed: %d\n", packets_read);
     printf("Valid packets:  %d\n", valid_packets);
-    printf("Total discards: %lu (packets skipped due to invalid symbol)\n", total_discards);
     printf("Errors:         %d\n", errors);
 
     if (errors == 0 && packets_read > 0) {

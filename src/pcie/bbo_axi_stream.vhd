@@ -4,9 +4,10 @@
 --
 -- SIMPLIFIED VERSION: No CDC FIFO, direct BBO pulse triggering.
 -- BBO data arrives as a single-cycle pulse (bbo_valid) with all data stable.
--- Data is latched and transmitted as 6 beats over AXI-Stream.
+-- Data is latched and transmitted as 7 beats over AXI-Stream.
 --
--- BBO Message Format (48 bytes over AXI-Stream):
+-- BBO Message Format (56 bytes over AXI-Stream):
+--   Beat 0: Magic Header (4 bytes: 0xBB0BB048) + Packet Length (4 bytes: 0x00000038)
 --   Beat 1: Symbol (8 bytes)
 --   Beat 2: Bid Price (4 bytes) + Bid Size (4 bytes)
 --   Beat 3: Ask Price (4 bytes) + Ask Size (4 bytes)
@@ -14,9 +15,12 @@
 --   Beat 5: T2 timestamp (4 bytes) + T3 timestamp (4 bytes)
 --   Beat 6: T4 timestamp (4 bytes) + Reserved/Padding (4 bytes)
 --
+-- Magic Header: 0xBB0BB048 (mnemonic: "BBO" + "48" for original 48-byte payload)
+-- Packet Length: 0x00000038 (56 bytes total including header)
+--
 -- AXI-Stream Output:
 --   64-bit data width (8 bytes per beat)
---   6 beats per BBO message (48 bytes)
+--   7 beats per BBO message (56 bytes)
 --   TLAST asserted on Beat 6 (final beat)
 --
 -- Clock Domain: axi_aclk (XDMA clock, 250 MHz for Gen2 x1)
@@ -34,7 +38,7 @@ use IEEE.NUMERIC_STD.ALL;
 entity bbo_axi_stream is
     Generic (
         C_AXI_DATA_WIDTH : integer := 64;   -- 64-bit AXI-Stream (XDMA default)
-        C_BBO_SIZE       : integer := 44    -- BBO message size in bytes
+        C_BBO_SIZE       : integer := 56    -- BBO message size in bytes (now 56 with header)
     );
     Port (
         -- AXI clock and reset
@@ -67,19 +71,26 @@ entity bbo_axi_stream is
         bbo_count      : out STD_LOGIC_VECTOR(31 downto 0);
         fifo_overflow  : out STD_LOGIC;
 
-        -- Debug: State machine state (0=IDLE, 1-6=BEAT1-6)
+        -- Debug: State machine state (0=IDLE, 1-7=BEAT0-6)
         dbg_state      : out STD_LOGIC_VECTOR(3 downto 0)
     );
 end bbo_axi_stream;
 
 architecture Behavioral of bbo_axi_stream is
 
-    -- State machine: IDLE + 6 beats
-    type state_type is (IDLE, BEAT1, BEAT2, BEAT3, BEAT4, BEAT5, BEAT6);
+    -- Magic header constant
+    constant MAGIC_HEADER  : STD_LOGIC_VECTOR(31 downto 0) := x"BB0BB048";
+    constant PACKET_LENGTH : STD_LOGIC_VECTOR(31 downto 0) := x"00000038";
+
+    -- State machine: IDLE + 7 beats (BEAT0 is new header beat)
+    type state_type is (IDLE, BEAT0, BEAT1, BEAT2, BEAT3, BEAT4, BEAT5, BEAT6);
     signal state : state_type := IDLE;
 
     -- Latched BBO data (352 bits = 44 bytes)
     signal bbo_latched : STD_LOGIC_VECTOR(351 downto 0) := (others => '0');
+
+    -- Latched symbol for BEAT1 (byte-swapped, ready to send)
+    signal symbol_latched : STD_LOGIC_VECTOR(63 downto 0) := (others => '0');
 
     -- Counter for transmitted BBOs
     signal bbo_counter : unsigned(31 downto 0) := (others => '0');
@@ -127,14 +138,15 @@ begin
     -- No overflow in simplified version
     fifo_overflow <= '0';
 
-    -- State debug output (0=IDLE, 1-6=BEAT1-6)
+    -- State debug output (0=IDLE, 1=BEAT0, 2-7=BEAT1-6)
     dbg_state <= "0000" when state = IDLE else
-                 "0001" when state = BEAT1 else
-                 "0010" when state = BEAT2 else
-                 "0011" when state = BEAT3 else
-                 "0100" when state = BEAT4 else
-                 "0101" when state = BEAT5 else
-                 "0110";  -- BEAT6
+                 "0001" when state = BEAT0 else
+                 "0010" when state = BEAT1 else
+                 "0011" when state = BEAT2 else
+                 "0100" when state = BEAT3 else
+                 "0101" when state = BEAT4 else
+                 "0110" when state = BEAT5 else
+                 "0111";  -- BEAT6
 
     -- Cycle counter process (free-running, for T3/T4 timestamps)
     process(aclk)
@@ -159,6 +171,7 @@ begin
                 tkeep_int <= (others => '0');
                 tdata_int <= (others => '0');
                 bbo_latched <= (others => '0');
+                symbol_latched <= (others => '0');
                 bbo_counter <= (others => '0');
                 ready_int <= '0';  -- Not ready during startup
                 startup_counter <= (others => '0');
@@ -187,93 +200,97 @@ begin
                             -- Capture T3: BBO ready for PCIe transmission (NOW)
                             ts_t3_captured <= std_logic_vector(cycle_counter);
 
-                            -- Latch all BBO data (must be done BEFORE using it)
-                            -- Note: T3/T4 slots will be filled with captured values later
+                            -- Latch all BBO data
                             bbo_latched <= bbo_symbol &
                                           bbo_bid_price & bbo_bid_size &
                                           bbo_ask_price & bbo_ask_size &
                                           bbo_spread &
                                           bbo_ts_t1 & bbo_ts_t2 & bbo_ts_t3 & bbo_ts_t4;
 
-                            -- Pre-load Beat 1 data (Symbol) - use direct input since latch
-                            -- won't be available until next cycle
-                            tdata_int <= byte_swap_64(bbo_symbol);
+                            -- Pre-compute byte-swapped symbol for BEAT1
+                            symbol_latched <= byte_swap_64(bbo_symbol);
+
+                            -- Pre-load Beat 0 data (Magic Header + Packet Length)
+                            -- Byte-swap for little-endian AXI-Stream: magic in bytes 0-3, length in bytes 4-7
+                            tdata_int <= byte_swap_64(MAGIC_HEADER & PACKET_LENGTH);
                             tkeep_int <= (others => '1');
                             ready_int <= '0';  -- Busy transmitting
-                            state <= BEAT1;
+                            state <= BEAT0;
                         end if;
 
-                    when BEAT1 =>
-                        -- Beat 1: Symbol (bytes 0-7)
-                        -- tdata was pre-loaded in IDLE with the correct symbol value
-                        -- IMPORTANT: Don't modify tdata here - it holds the symbol
+                    when BEAT0 =>
+                        -- Beat 0: Magic Header + Packet Length
+                        -- tdata was pre-loaded in IDLE
                         tvalid_int <= '1';
                         tlast_int <= '0';
 
                         if tvalid_int = '1' and m_axis_tready = '1' then
-                            -- Capture T4: First AXI-Stream beat accepted (TX started)
+                            -- Handshake complete, load symbol for BEAT1
+                            tdata_int <= symbol_latched;
+                            state <= BEAT1;
+                        end if;
+
+                    when BEAT1 =>
+                        -- Beat 1: Symbol (bytes 8-15)
+                        -- tdata was pre-loaded in BEAT0
+                        tvalid_int <= '1';
+                        tlast_int <= '0';
+
+                        if tvalid_int = '1' and m_axis_tready = '1' then
+                            -- Capture T4: First data beat accepted
                             ts_t4_captured <= std_logic_vector(cycle_counter);
-                            -- Handshake complete for beat 1
-                            -- Pre-load beat 2 data for next cycle
+                            -- Pre-load beat 2 data
                             tdata_int <= bbo_latched(255 downto 224) & bbo_latched(287 downto 256);
                             state <= BEAT2;
                         end if;
 
                     when BEAT2 =>
-                        -- Beat 2: BidPrice (bytes 8-11) + BidSize (bytes 12-15)
-                        -- Data was pre-loaded in BEAT1
+                        -- Beat 2: BidPrice + BidSize
                         tvalid_int <= '1';
                         tlast_int <= '0';
 
                         if tvalid_int = '1' and m_axis_tready = '1' then
-                            -- Pre-load beat 3 data
                             tdata_int <= bbo_latched(191 downto 160) & bbo_latched(223 downto 192);
                             state <= BEAT3;
                         end if;
 
                     when BEAT3 =>
-                        -- Beat 3: AskPrice (bytes 16-19) + AskSize (bytes 20-23)
+                        -- Beat 3: AskPrice + AskSize
                         tvalid_int <= '1';
                         tlast_int <= '0';
 
                         if tvalid_int = '1' and m_axis_tready = '1' then
-                            -- Pre-load beat 4 data
                             tdata_int <= bbo_latched(127 downto 96) & bbo_latched(159 downto 128);
                             state <= BEAT4;
                         end if;
 
                     when BEAT4 =>
-                        -- Beat 4: Spread (bytes 24-27) + T1 (bytes 28-31)
+                        -- Beat 4: Spread + T1
                         tvalid_int <= '1';
                         tlast_int <= '0';
 
                         if tvalid_int = '1' and m_axis_tready = '1' then
-                            -- Pre-load beat 5 data: T2 (from latched) + T3 (captured locally)
                             tdata_int <= ts_t3_captured & bbo_latched(95 downto 64);
                             state <= BEAT5;
                         end if;
 
                     when BEAT5 =>
-                        -- Beat 5: T2 (bytes 32-35) + T3 (bytes 36-39, captured locally)
+                        -- Beat 5: T2 + T3
                         tvalid_int <= '1';
                         tlast_int <= '0';
 
                         if tvalid_int = '1' and m_axis_tready = '1' then
-                            -- Pre-load beat 6 data: T4 (captured locally) + Padding
                             tdata_int <= x"00000000" & ts_t4_captured;
                             state <= BEAT6;
                         end if;
 
                     when BEAT6 =>
-                        -- Beat 6: T4 (bytes 40-43, captured locally) + Padding (bytes 44-47)
-                        -- Data was pre-loaded in BEAT5
+                        -- Beat 6: T4 + Padding (LAST beat)
                         tvalid_int <= '1';
                         tlast_int <= '1';
 
                         if tvalid_int = '1' and m_axis_tready = '1' then
-                            -- Transaction complete
                             bbo_counter <= bbo_counter + 1;
-                            -- Deassert valid/last and return to IDLE
                             tvalid_int <= '0';
                             tlast_int <= '0';
                             ready_int <= '1';

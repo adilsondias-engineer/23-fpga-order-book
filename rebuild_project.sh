@@ -19,20 +19,21 @@ echo "  - PCIe Gen1 x4 BBO streaming output"
 echo ""
 echo "Data flow: Ethernet -> ITCH -> Order Book -> BBO -> PCIe -> Host"
 echo ""
+export PATH=/tools/Xilinx/2025.1/Vivado/bin:$PATH
 
 # Check for Vivado
 if ! command -v vivado &> /dev/null; then
     # Try common Vivado installation paths
-    if [ -f "/tools/Xilinx/Vivado/2025.1/settings64.sh" ]; then
-        source /tools/Xilinx/Vivado/2025.1/settings64.sh
-    elif [ -f "/opt/Xilinx/Vivado/2025.1/settings64.sh" ]; then
-        source /opt/Xilinx/Vivado/2025.1/settings64.sh
-    elif [ -f "$HOME/Xilinx/Vivado/2025.1/settings64.sh" ]; then
-        source "$HOME/Xilinx/Vivado/2025.1/settings64.sh"
+    if [ -f "/tools/Xilinx/2025.1/Vivado/settings64.sh" ]; then
+        source /tools/Xilinx/2025.1/Vivado/settings64.sh
+    elif [ -f "/tools/Xilinx/2025.1/Vivado/settings64.sh" ]; then
+        source /tools/Xilinx/2025.1/Vivado/settings64.sh
+    elif [ -f "$HOME/tools/Xilinx/2025.1/Vivado/settings64.sh" ]; then
+        source "$HOME/tools/Xilinx/2025.1/Vivado/settings64.sh"
     else
         echo "ERROR: Vivado not found in PATH."
         echo "Please source Vivado settings64.sh or add Vivado to PATH."
-        echo "  Example: source /tools/Xilinx/Vivado/2025.1/settings64.sh"
+        echo "  Example: source /tools/Xilinx/2025.1/Vivado/settings64.sh"
         exit 1
     fi
 fi
